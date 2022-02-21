@@ -13,6 +13,8 @@
 #include <utility>
 #include <vector>
 #include <array>
+#include <tuple>
+#include <functional>
 
 const char *INPUT_FILENAME  = "input.txt";
 const char *CRYPT_FILENAME  = "crypt.txt";
@@ -50,6 +52,44 @@ uint16_t cipher1_func(uint16_t x, uint16_t k)
 }
 
 
+constexpr int CIPHER2_ROUNDS = 128;
+uint32_t cipher2_func(uint32_t x, uint32_t k)
+{
+	uint32_t y = ((x << 13) | (x >> (32-13-1))) + k;
+	return (y >> 17) | (y << (32-17-1));
+}
+
+
+template <typename ST, typename KT>
+auto feistel_round(const std::tuple<ST, ST> &block,
+                   KT key,
+                   const std::function<ST(ST, KT)> &func)
+{
+	return std::make_tuple<ST, ST>(
+			static_cast<ST>(std::get<1>(block)),
+			static_cast<ST>(std::get<0>(block) ^ func(
+					std::get<1>(block), key)));
+}
+
+template <typename BT, typename ST>
+auto unpack(BT block)
+{
+	return std::make_tuple<ST, ST>(
+			static_cast<ST>(
+					((static_cast<BT>(1) <<
+							(sizeof(ST) * 8))-1) & block),
+			static_cast<ST>(
+					block >> (sizeof(ST) * 8) ));
+}
+
+template <typename BT, typename ST>
+BT pack(const std::tuple<ST, ST> &block)
+{
+	return (static_cast<BT>(std::get<1>(block)) <<
+			(sizeof(ST) * 8)) |
+			std::get<0>(block);
+}
+
 void generate_key(const char *filename, size_t size_in_bytes)
 {
 	std::vector<char> data(size_in_bytes);
@@ -60,6 +100,59 @@ void generate_key(const char *filename, size_t size_in_bytes)
 	keyfile.write(&data[0], size_in_bytes);
 	keyfile.close();
 }
+
+template <typename BT, typename ST, typename KT>
+BT feistel_encrypt(BT block, const std::vector<KT> &key,
+                   const std::function<ST(ST, KT)> &func)
+{
+	auto t = unpack<BT, ST>(block);
+	auto rounds = key.size();
+	typeof(rounds) r;
+	for (r = 0; r < rounds; ++r) {
+		t = feistel_round(t, key[r], func);
+	}
+
+	return pack<BT, ST>(std::make_tuple<ST,ST>(
+			static_cast<ST>(std::get<1>(t)),
+			static_cast<ST>(std::get<0>(t))));
+}
+
+template <typename BT, typename ST, typename KT>
+BT feistel_decrypt(BT block, const std::vector<KT> &key,
+                   const std::function<ST(ST, KT)> &func)
+{
+	auto t = unpack<BT, ST>(block);
+	auto rounds = key.size();
+	typeof(rounds) r;
+	for (r = 0; r < rounds; ++r) {
+		t = feistel_round(t, key[rounds - r - 1], func);
+	}
+
+	return pack<BT, ST>(std::make_tuple<ST,ST>(
+			static_cast<ST>(std::get<1>(t)),
+			static_cast<ST>(std::get<0>(t))));
+}
+
+template <typename BT, typename ST, typename KT, bool DE>
+BT feistel_endecrypt(BT block, const std::vector<KT> &key,
+                   const std::function<ST(ST, KT)> &func)
+{
+	auto t = unpack(block);
+	auto rounds = key.size();
+	typeof(rounds) r;
+	for (r = 0; r < rounds; ++r) {
+		KT k;
+		if constexpr (DE == false)
+			k = key[r];
+		else
+			k = key[rounds - r - 1];
+		t = feistel_round(t, k, func);
+	}
+
+	return pack(std::make_tuple<ST,ST>(
+			std::get<1>(t), std::get<0>(t)));
+}
+
 
 template <typename KT>
 std::vector<KT> load_key(const char *filename)
@@ -79,7 +172,8 @@ std::vector<KT> load_key(const char *filename)
 template <typename BT, typename ST, typename KT>
 void encrypt_file(const char *input_filename,
                   const char *crypt_filename,
-                  const std::vector<KT> &key)
+                  const std::vector<KT> &key,
+                  const std::function<ST(ST,KT)> &func)
 {
 	std::ifstream input_file(input_filename,
 	        std::ios::binary | std::ios::ate);
@@ -101,6 +195,9 @@ void encrypt_file(const char *input_filename,
 		        sizeof(current_block));
 
 		// Тут будет зашифрование текущего блока
+		current_block = feistel_encrypt<BT, ST, KT>(
+				current_block, key, func);
+
 
 		crypt_file.write(
 				reinterpret_cast<char*>(&current_block),
@@ -111,7 +208,8 @@ void encrypt_file(const char *input_filename,
 template <typename BT, typename ST, typename KT>
 void decrypt_file(const char *crypt_filename,
                   const char *output_filename,
-                  const std::vector<KT> &key)
+                  const std::vector<KT> &key,
+                  const std::function<ST(ST,KT)> &func)
 {
 	std::ifstream crypt_file(crypt_filename,
 	        std::ios::binary);
@@ -132,6 +230,8 @@ void decrypt_file(const char *crypt_filename,
 		        sizeof(current_block));
 
 		// Тут будет расшифрование текущего блока
+		current_block = feistel_decrypt<BT, ST, KT>(
+				current_block, key, func);
 
 		size_t to_write = block_size;
 		if (orig_size < block_size)
@@ -143,22 +243,43 @@ void decrypt_file(const char *crypt_filename,
 	}
 }
 
+void test1()
+{
+	generate_key(KEY1_FILENAME,
+			CIPHER1_ROUNDS * sizeof(uint16_t));
+	generate_key(KEY2_FILENAME,
+	             CIPHER1_ROUNDS * sizeof(uint16_t));
+	auto key1 = load_key<uint16_t>(KEY1_FILENAME);
+	auto key2 = load_key<uint16_t>(KEY2_FILENAME);
+	encrypt_file<uint32_t, uint16_t, uint16_t>(
+			INPUT_FILENAME, CRYPT_FILENAME,
+			key1, cipher1_func);
+	decrypt_file<uint32_t, uint16_t, uint16_t>(
+			CRYPT_FILENAME, OUTPUT_FILENAME,
+			key1, cipher1_func);
+}
+
+void test2()
+{
+	generate_key(KEY1_FILENAME,
+			CIPHER2_ROUNDS * sizeof(uint32_t));
+	generate_key(KEY2_FILENAME,
+	        CIPHER2_ROUNDS * sizeof(uint32_t));
+	auto key1 = load_key<uint32_t>(KEY1_FILENAME);
+	auto key2 = load_key<uint32_t>(KEY2_FILENAME);
+	encrypt_file<uint64_t, uint32_t, uint32_t>(
+			INPUT_FILENAME, CRYPT_FILENAME,
+			key1, cipher2_func);
+	decrypt_file<uint64_t, uint32_t, uint32_t>(
+			CRYPT_FILENAME, OUTPUT_FILENAME,
+			key1, cipher2_func);
+}
+
 int main()
 {
 	random_gen = init_random();
 
-	generate_key(KEY1_FILENAME,
-	             CIPHER1_ROUNDS * sizeof(uint16_t));
-	generate_key(KEY2_FILENAME,
-	             CIPHER1_ROUNDS * sizeof(uint16_t));
-
-	auto key1 = load_key<uint16_t>(KEY1_FILENAME);
-
-	encrypt_file<uint32_t, uint16_t, uint16_t>(
-			INPUT_FILENAME, CRYPT_FILENAME, key1);
-	decrypt_file<uint32_t, uint16_t, uint16_t>(
-			CRYPT_FILENAME, OUTPUT_FILENAME, key1);
-
+	test2();
 	return 0;
 }
 
