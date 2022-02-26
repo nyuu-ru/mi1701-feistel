@@ -22,6 +22,15 @@ const char *OUTPUT_FILENAME = "output.txt";
 const char *KEY1_FILENAME   = "key1.dat";
 const char *KEY2_FILENAME   = "key2.dat";
 
+constexpr uint16_t IV16 = 0x1234;
+constexpr uint32_t IV32 = 0x12345678;
+constexpr uint64_t IV64 = 0x1234567812345678ULL;
+
+enum class EncryptionMode
+{
+	ECB, CBC, CTR
+};
+
 std::mt19937 random_gen;
 
 std::mt19937 init_random()
@@ -153,7 +162,6 @@ BT feistel_endecrypt(BT block, const std::vector<KT> &key,
 			std::get<1>(t), std::get<0>(t)));
 }
 
-
 template <typename KT>
 std::vector<KT> load_key(const char *filename)
 {
@@ -167,11 +175,52 @@ std::vector<KT> load_key(const char *filename)
 	return result;
 }
 
-
-// TODO: передать туда алгоритм
+// ECB
 template <typename BT, typename ST, typename KT>
+BT encrypt_ecb(BT block,
+               const std::vector<KT> &key,
+               const std::function<ST(ST,KT)> &func)
+{
+	return feistel_encrypt<BT, ST, KT>(block, key, func);
+}
+
+template <typename BT, typename ST, typename KT>
+BT decrypt_ecb(BT block,
+               const std::vector<KT> &key,
+               const std::function<ST(ST,KT)> &func)
+{
+	return feistel_decrypt<BT, ST, KT>(block, key, func);
+}
+
+// CBC
+template <typename BT, typename ST, typename KT>
+BT encrypt_cbc(BT block,
+               BT &iv,
+               const std::vector<KT> &key,
+               const std::function<ST(ST,KT)> &func)
+{
+	return iv = feistel_encrypt<BT, ST, KT>(block ^ iv, key, func);
+}
+
+template <typename BT, typename ST, typename KT>
+BT decrypt_cbc(BT block,
+               BT &iv,
+               const std::vector<KT> &key,
+               const std::function<ST(ST,KT)> &func)
+{
+	BT old_iv = iv;
+	return feistel_decrypt<BT, ST, KT>((iv = block), key, func) ^ old_iv;
+}
+
+
+// CTR
+
+
+template <typename BT, typename ST, typename KT,
+	EncryptionMode MODE>
 void encrypt_file(const char *input_filename,
                   const char *crypt_filename,
+                  BT iv,
                   const std::vector<KT> &key,
                   const std::function<ST(ST,KT)> &func)
 {
@@ -195,9 +244,17 @@ void encrypt_file(const char *input_filename,
 		        sizeof(current_block));
 
 		// Тут будет зашифрование текущего блока
-		current_block = feistel_encrypt<BT, ST, KT>(
-				current_block, key, func);
-
+		if constexpr (MODE == EncryptionMode::ECB) {
+			current_block = encrypt_ecb<BT, ST, KT>(
+					current_block, key, func);
+		} else if constexpr (MODE == EncryptionMode::CBC) {
+			current_block = encrypt_cbc<BT, ST, KT>(
+					current_block, iv, key, func);
+		} else {
+			// Неизвестный режим
+			current_block = encrypt_ecb<BT, ST, KT>(
+					current_block, key, func);
+		}
 
 		crypt_file.write(
 				reinterpret_cast<char*>(&current_block),
@@ -205,9 +262,10 @@ void encrypt_file(const char *input_filename,
 	}
 }
 
-template <typename BT, typename ST, typename KT>
+template <typename BT, typename ST, typename KT, EncryptionMode MODE>
 void decrypt_file(const char *crypt_filename,
                   const char *output_filename,
+                  BT iv,
                   const std::vector<KT> &key,
                   const std::function<ST(ST,KT)> &func)
 {
@@ -230,8 +288,17 @@ void decrypt_file(const char *crypt_filename,
 		        sizeof(current_block));
 
 		// Тут будет расшифрование текущего блока
-		current_block = feistel_decrypt<BT, ST, KT>(
-				current_block, key, func);
+		if constexpr (MODE == EncryptionMode::ECB) {
+			current_block = decrypt_ecb<BT, ST, KT>(
+					current_block, key, func);
+		} else if constexpr (MODE == EncryptionMode::CBC) {
+			current_block = decrypt_cbc<BT, ST, KT>(
+					current_block, iv, key, func);
+		} else {
+			// Неизвестный режим, используем ECB
+			current_block = decrypt_ecb<BT, ST, KT>(
+					current_block, key, func);
+		}
 
 		size_t to_write = block_size;
 		if (orig_size < block_size)
@@ -251,12 +318,12 @@ void test1()
 	             CIPHER1_ROUNDS * sizeof(uint16_t));
 	auto key1 = load_key<uint16_t>(KEY1_FILENAME);
 	auto key2 = load_key<uint16_t>(KEY2_FILENAME);
-	encrypt_file<uint32_t, uint16_t, uint16_t>(
+	encrypt_file<uint32_t, uint16_t, uint16_t, EncryptionMode::ECB>(
 			INPUT_FILENAME, CRYPT_FILENAME,
-			key1, cipher1_func);
-	decrypt_file<uint32_t, uint16_t, uint16_t>(
+			IV32, key1, cipher1_func);
+	decrypt_file<uint32_t, uint16_t, uint16_t, EncryptionMode::ECB>(
 			CRYPT_FILENAME, OUTPUT_FILENAME,
-			key1, cipher1_func);
+			IV32, key1, cipher1_func);
 }
 
 void test2()
@@ -267,12 +334,12 @@ void test2()
 	        CIPHER2_ROUNDS * sizeof(uint32_t));
 	auto key1 = load_key<uint32_t>(KEY1_FILENAME);
 	auto key2 = load_key<uint32_t>(KEY2_FILENAME);
-	encrypt_file<uint64_t, uint32_t, uint32_t>(
+	encrypt_file<uint64_t, uint32_t, uint32_t, EncryptionMode::ECB>(
 			INPUT_FILENAME, CRYPT_FILENAME,
-			key1, cipher2_func);
-	decrypt_file<uint64_t, uint32_t, uint32_t>(
+			IV64, key1, cipher2_func);
+	decrypt_file<uint64_t, uint32_t, uint32_t, EncryptionMode::ECB>(
 			CRYPT_FILENAME, OUTPUT_FILENAME,
-			key1, cipher2_func);
+			IV64, key1, cipher2_func);
 }
 
 int main()
