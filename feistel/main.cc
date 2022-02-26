@@ -28,7 +28,7 @@ constexpr uint64_t IV64 = 0x1234567812345678ULL;
 
 enum class EncryptionMode
 {
-	ECB, CBC, CTR
+	ECB, CBC, CTR, CFB
 };
 
 std::mt19937 random_gen;
@@ -175,7 +175,9 @@ std::vector<KT> load_key(const char *filename)
 	return result;
 }
 
-// ECB
+// Режимы шифрования (ГОСТ 34.13)
+
+// ECB (Electronic CodeBook) - режим простой замены
 template <typename BT, typename ST, typename KT>
 BT encrypt_ecb(BT block,
                const std::vector<KT> &key,
@@ -212,8 +214,38 @@ BT decrypt_cbc(BT block,
 	return feistel_decrypt<BT, ST, KT>((iv = block), key, func) ^ old_iv;
 }
 
+// CTR (CounTeR) - режим гаммирования
+template <typename BT, typename ST, typename KT>
+BT encrypt_ctr(BT block, BT iv, BT ctr,
+               const std::vector<KT> &key,
+               const std::function<ST(ST,KT)> &func)
+{
+	return block ^ feistel_encrypt(iv + ctr, key, func);
+}
 
-// CTR
+// CFB (Cipher FeedBack) - режим гаммирования
+// 		с обратной связью по шифртексту
+template <typename BT, typename ST, typename KT>
+BT encrypt_cfb(BT block, BT &iv1, BT &iv2,
+               const std::vector<KT> &key,
+               const std::function<ST(ST,KT)> &func)
+{
+	BT old_iv2 = iv2;
+	iv2 = block ^ feistel_encrypt(iv1, key, func);
+	iv1 = old_iv2;
+	return iv2;
+}
+
+template <typename BT, typename ST, typename KT>
+BT decrypt_cfb(BT block, BT &iv1, BT &iv2,
+               const std::vector<KT> &key,
+               const std::function<ST(ST,KT)> &func)
+{
+	BT result = block ^ feistel_encrypt(iv1, key, func);
+	iv1 = iv2;
+	iv2 = block;
+	return result;
+}
 
 
 template <typename BT, typename ST, typename KT,
@@ -237,8 +269,11 @@ void encrypt_file(const char *input_filename,
 	uint32_t orig_size = file_size;
 	crypt_file.write(reinterpret_cast<char*>(&orig_size),
 	        sizeof(orig_size));
+
+	BT iv1, iv2;
+	iv1 = iv2 = iv;
 	for (typeof (blocks) i = 0; i < blocks; ++i) {
-		uint32_t current_block = 0;
+		BT current_block = 0;
 		input_file.read(
 				reinterpret_cast<char*>(&current_block),
 		        sizeof(current_block));
@@ -250,6 +285,12 @@ void encrypt_file(const char *input_filename,
 		} else if constexpr (MODE == EncryptionMode::CBC) {
 			current_block = encrypt_cbc<BT, ST, KT>(
 					current_block, iv, key, func);
+		} else if constexpr (MODE == EncryptionMode::CTR) {
+			current_block = encrypt_ctr(current_block, iv,
+					static_cast<BT>(i), key, func);
+		} else if constexpr (MODE == EncryptionMode::CFB) {
+			current_block = encrypt_cfb(current_block, iv1, iv2,
+					key, func);
 		} else {
 			// Неизвестный режим
 			current_block = encrypt_ecb<BT, ST, KT>(
@@ -281,8 +322,10 @@ void decrypt_file(const char *crypt_filename,
 	if (orig_size % block_size != 0)
 		blocks++;
 
+	BT iv1, iv2;
+	iv1 = iv2 = iv;
 	for (typeof (blocks) i = 0; i < blocks; ++i) {
-		uint32_t current_block = 0;
+		BT current_block = 0;
 		crypt_file.read(
 				reinterpret_cast<char*>(&current_block),
 		        sizeof(current_block));
@@ -294,6 +337,12 @@ void decrypt_file(const char *crypt_filename,
 		} else if constexpr (MODE == EncryptionMode::CBC) {
 			current_block = decrypt_cbc<BT, ST, KT>(
 					current_block, iv, key, func);
+		} else if constexpr (MODE == EncryptionMode::CTR) {
+			current_block = encrypt_ctr(current_block, iv,
+					static_cast<BT>(i), key, func);
+		} else if constexpr (MODE == EncryptionMode::CFB) {
+			current_block = decrypt_cfb(current_block, iv1, iv2,
+					key, func);
 		} else {
 			// Неизвестный режим, используем ECB
 			current_block = decrypt_ecb<BT, ST, KT>(
@@ -334,10 +383,10 @@ void test2()
 	        CIPHER2_ROUNDS * sizeof(uint32_t));
 	auto key1 = load_key<uint32_t>(KEY1_FILENAME);
 	auto key2 = load_key<uint32_t>(KEY2_FILENAME);
-	encrypt_file<uint64_t, uint32_t, uint32_t, EncryptionMode::ECB>(
+	encrypt_file<uint64_t, uint32_t, uint32_t, EncryptionMode::CFB>(
 			INPUT_FILENAME, CRYPT_FILENAME,
 			IV64, key1, cipher2_func);
-	decrypt_file<uint64_t, uint32_t, uint32_t, EncryptionMode::ECB>(
+	decrypt_file<uint64_t, uint32_t, uint32_t, EncryptionMode::CFB>(
 			CRYPT_FILENAME, OUTPUT_FILENAME,
 			IV64, key1, cipher2_func);
 }
